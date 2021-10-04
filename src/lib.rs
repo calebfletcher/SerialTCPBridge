@@ -1,12 +1,13 @@
+use log::{info, warn};
 use std::error::Error;
 use std::io::prelude::*;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 
-pub fn start(host: &str, port: u16, device: &str, _verbose: i32) -> Result<(), Box<dyn Error>> {
+pub fn start(host: &str, port: u16, device: &str) -> Result<(), Box<dyn Error>> {
     // Connect to serial device
     let serial_device = serialport::new(device, 9600).open()?;
-    println!("Connected to {}", device);
+    info!("Connected to {}", device);
 
     //  One serial port, multiple TCP sockets
     //  When data is received from serial, it is sent to all TCP sockets
@@ -59,12 +60,12 @@ pub fn start(host: &str, port: u16, device: &str, _verbose: i32) -> Result<(), B
     let ip: IpAddr = host.parse()?;
     let addr = SocketAddr::new(ip, port);
     let listener = TcpListener::bind(addr)?;
-    println!("Listening on {}", addr);
+    info!("Listening on {}", addr);
 
     loop {
         // Get connections from socket
         let (socket, addr) = listener.accept()?;
-        println!("Got connection from {}", addr);
+        info!("Got connection from {}", addr);
 
         // Create channels for connection
         let (socket_tx_sender, socket_tx_receiver) = mpsc::channel::<Vec<u8>>();
@@ -90,18 +91,18 @@ fn spawn_socket_thread(
         let mut buf = vec![0; 64];
         let bytes_read = match socket_rx.read(&mut buf) {
             Ok(0) => {
-                eprintln!("Socket closed or empty");
+                warn!("Socket closed");
                 break;
             }
             Ok(n) => n,
             Err(e) => {
-                eprintln!("Socker error: {}", e);
+                warn!("Socker error: {}", e);
                 0
             }
         };
         let received_data = buf[..bytes_read].to_vec();
         if let Err(e) = rx_sender.send(received_data) {
-            eprintln!("Channel put error: {}", e);
+            warn!("Channel put error: {}", e);
         }
     });
 
@@ -169,7 +170,7 @@ fn create_serial_threads(
     std::thread::spawn(move || loop {
         let mut item = match tx_channel.recv() {
             Err(e) => {
-                eprintln!("Serial: Serial TX channel closed: {}", e);
+                warn!("Serial: Serial TX channel closed: {}", e);
                 break;
             }
             Ok(item) => item,

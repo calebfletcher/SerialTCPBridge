@@ -3,8 +3,9 @@ use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let opts: Opts = Opts::parse();
+    env_logger::init();
 
-    serial_tcp_bridge::start(&opts.host, opts.port, &opts.device, opts.verbose)
+    serial_tcp_bridge::start(&opts.host, opts.port, &opts.device)
         .unwrap_or_else(|err| eprintln!("Unable to start server: {}", err));
     Ok(())
 }
@@ -23,7 +24,4 @@ pub struct Opts {
     /// The serial port to connect to
     #[clap(short, long)]
     device: String,
-    /// A level of verbosity, and can be used multiple times
-    #[clap(short, long, parse(from_occurrences))]
-    verbose: i32,
 }
