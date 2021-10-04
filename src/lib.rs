@@ -7,16 +7,17 @@ fn handle_client(mut stream: TcpStream) -> std::io::Result<()> {
     stream.shutdown(Shutdown::Both)
 }
 
-pub fn start() -> Result<(), Box<dyn Error>> {
-    let host = "127.0.0.1";
-    let port: u16 = "41843".parse()?;
-    let ip: IpAddr = host.parse().unwrap();
+pub fn start(host: &str, port: u16, verbose: i32) -> Result<(), Box<dyn Error>> {
+    let ip: IpAddr = host.parse()?;
     let addr = SocketAddr::new(ip, port);
     println!("Listening on {}", addr);
     let listener = TcpListener::bind(addr)?;
 
-    for stream in listener.incoming() {
-        handle_client(stream?)?
+    loop {
+        let (socket, addr) = listener.accept()?;
+        if verbose >= 1 {
+            println!("Got connection from {}", addr);
+        }
+        handle_client(socket)?;
     }
-    Ok(())
 }
