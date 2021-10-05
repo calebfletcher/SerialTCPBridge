@@ -1,4 +1,4 @@
-use clap::{AppSettings, Clap};
+use clap::{crate_authors, crate_version, AppSettings, Clap};
 use std::error::Error;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
 /// Creates a TCP to Serial bridge
 #[derive(Clap)]
-#[clap(version = "0.1.0", author = "Caleb Fletcher <caleb@fletcher.cf>")]
+#[clap(version = crate_version!(), author = crate_authors!())]
 #[clap(setting = AppSettings::ColoredHelp)]
 pub struct Opts {
     /// The IP to listen on
