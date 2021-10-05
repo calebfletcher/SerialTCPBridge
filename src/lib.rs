@@ -1,8 +1,14 @@
 use log::{info, warn};
+use std::collections::HashMap;
 use std::error::Error;
 use std::io::prelude::*;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
+
+enum SocketChange {
+    Added(SocketAddr, (mpsc::Sender<Vec<u8>>, mpsc::Receiver<Vec<u8>>)),
+    Removed(SocketAddr),
+}
 
 pub fn start(host: &str, port: u16, device: &str) -> Result<(), Box<dyn Error>> {
     // Connect to serial device
@@ -64,39 +70,60 @@ pub fn start(host: &str, port: u16, device: &str) -> Result<(), Box<dyn Error>> 
 
     loop {
         // Get connections from socket
-        let (socket, addr) = listener.accept()?;
-        info!("Got connection from {}", addr);
+        let (socket, peer_addr) = listener.accept()?;
+        info!("Got connection from {}", peer_addr);
 
         // Create channels for connection
         let (socket_tx_sender, socket_tx_receiver) = mpsc::channel::<Vec<u8>>();
         let (socket_rx_sender, socket_rx_receiver) = mpsc::channel::<Vec<u8>>();
 
+        // Notify coordinator that a new socket connected
         coordinator_channels_sender
-            .send((socket_tx_sender, socket_rx_receiver))
+            .send(SocketChange::Added(
+                peer_addr,
+                (socket_tx_sender, socket_rx_receiver),
+            ))
             .expect("Control: Unable to send channels to coordinator");
 
         // Move ownership of the socket and channels into the created thread
-        spawn_socket_thread(socket, socket_rx_sender, socket_tx_receiver);
+        spawn_socket_thread(
+            coordinator_channels_sender.clone(),
+            socket,
+            socket_rx_sender,
+            socket_tx_receiver,
+        );
     }
 }
 
 fn spawn_socket_thread(
+    channels_sender: mpsc::Sender<SocketChange>,
     socket: TcpStream,
     rx_sender: mpsc::Sender<std::vec::Vec<u8>>,
     tx_receiver: mpsc::Receiver<std::vec::Vec<u8>>,
 ) {
     let mut socket_rx = socket.try_clone().expect("Socket: Unable to clone socket");
     let mut socket_tx = socket.try_clone().expect("Socket: Unable to clone socket");
+
+    let channels_sender_tx = channels_sender.clone();
+    let channels_sender_rx = channels_sender.clone();
+
     std::thread::spawn(move || loop {
         let mut buf = vec![0; 64];
         let bytes_read = match socket_rx.read(&mut buf) {
             Ok(0) => {
-                warn!("Socket closed");
+                // Handle socket disconnect
+                let peer_addr = socket_rx
+                    .peer_addr()
+                    .expect("Socket: Unable to get peer address");
+                info!("Lost connection from {:?}", peer_addr);
+                channels_sender_tx
+                    .send(SocketChange::Removed(peer_addr))
+                    .expect("Socket: Unable to send channel removal");
                 break;
             }
             Ok(n) => n,
             Err(e) => {
-                warn!("Socker error: {}", e);
+                warn!("Socket error: {}", e);
                 0
             }
         };
@@ -107,39 +134,57 @@ fn spawn_socket_thread(
     });
 
     std::thread::spawn(move || loop {
-        let rx_data = tx_receiver
-            .recv()
-            .expect("Socket: Unable to read from tx channel");
-        socket_tx
-            .write_all(&rx_data)
-            .expect("Socket: Unable to write to socket");
+        match tx_receiver.recv() {
+            Ok(rx_data) => {
+                socket_tx
+                    .write_all(&rx_data)
+                    .expect("Socket: Unable to write to socket");
+            }
+            Err(_) => {
+                let peer_addr = socket_tx
+                    .peer_addr()
+                    .expect("Socket: Unable to get peer address");
+                channels_sender_rx
+                    .send(SocketChange::Removed(peer_addr))
+                    .expect("Socket: Unable to send channel removal");
+                break;
+            }
+        }
     });
 }
 
 fn create_coordinator_thread(
-    channels_receiver: mpsc::Receiver<(
-        mpsc::Sender<std::vec::Vec<u8>>,
-        mpsc::Receiver<std::vec::Vec<u8>>,
-    )>,
+    channels_receiver: mpsc::Receiver<SocketChange>,
     serial_tx: mpsc::Sender<std::vec::Vec<u8>>,
     serial_rx: mpsc::Receiver<std::vec::Vec<u8>>,
 ) {
     std::thread::spawn(move || {
-        let mut socket_tx_channels = Vec::new();
-        let mut socket_rx_channels = Vec::new();
+        // Create storage of socket channels
+        let mut sockets_map: HashMap<
+            SocketAddr,
+            (
+                mpsc::Sender<std::vec::Vec<u8>>,
+                mpsc::Receiver<std::vec::Vec<u8>>,
+            ),
+        > = HashMap::new();
 
         loop {
             // Check for new channels to keep track of
-            if let Ok(channels) = channels_receiver.try_recv() {
-                let (tx_channel, rx_channel) = channels;
-                socket_tx_channels.push(tx_channel);
-                socket_rx_channels.push(rx_channel);
+            if let Ok(item) = channels_receiver.try_recv() {
+                match item {
+                    SocketChange::Added(addr, channels) => {
+                        sockets_map.insert(addr, channels);
+                    }
+                    SocketChange::Removed(addr) => {
+                        sockets_map.remove(&addr);
+                    }
+                };
             }
 
             // Transfer data from serial_rx_channel to multiple socket_tx_channel
             if let Ok(rx_data) = serial_rx.try_recv() {
                 // For each socket
-                for socket_tx_channel in &socket_tx_channels {
+                for (socket_tx_channel, _) in sockets_map.values() {
                     // Send received data to each socket
                     socket_tx_channel
                         .send(rx_data.clone())
@@ -147,7 +192,7 @@ fn create_coordinator_thread(
                 }
             }
             // Transfer data from multiple socket_rx_channel to serial_tx_channel
-            for socket_rx_channel in &socket_rx_channels {
+            for (_, socket_rx_channel) in sockets_map.values() {
                 if let Ok(rx_data) = socket_rx_channel.try_recv() {
                     serial_tx
                         .send(rx_data)
